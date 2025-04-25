@@ -1,12 +1,41 @@
-# src/data_pipeline/validators/data_validator.py
+"""
+Data Validator - Validator for price and macro data
+
+This component validates data quality and reports issues.
+"""
 
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, Union, List
-from .base import BaseValidator
 
+from balance_breaker.src.core.interface_registry import implements
+from balance_breaker.src.data_pipeline.base import BaseValidator
+
+@implements("DataValidator")
 class DataValidator(BaseValidator):
-    """Validator for price and macro data"""
+    """
+    Validator for price and macro data
+    
+    Parameters:
+    -----------
+    required_price_columns : List[str]
+        Required columns for price data (default: ['open', 'high', 'low', 'close'])
+    warning_threshold : float
+        Threshold for NaN values to trigger warning (as percentage) (default: 0.05)
+    gap_warning_threshold : float
+        Threshold for gaps to trigger warning (as percentage) (default: 0.01)
+    """
+    
+    def __init__(self, parameters=None):
+        # Define default parameters
+        default_params = {
+            'required_price_columns': ['open', 'high', 'low', 'close'],
+            'warning_threshold': 0.05,  # 5% NaN values
+            'gap_warning_threshold': 0.01  # 1% gaps
+        }
+        
+        # Initialize with parameters
+        super().__init__(parameters or default_params)
     
     def validate(self, data: Any, context: Dict[str, Any]) -> Dict[str, Any]:
         """Validate data quality
@@ -18,15 +47,25 @@ class DataValidator(BaseValidator):
         Returns:
             Validation results
         """
-        data_type = context.get('data_type', 'price')
-        
-        if data_type == 'price':
-            return self._validate_price_data(data, context)
-        elif data_type == 'macro':
-            return self._validate_macro_data(data, context)
-        else:
-            self.logger.warning(f"Unknown data type for validation: {data_type}")
-            return {'status': 'unknown', 'issues': [f"Unknown data type: {data_type}"]}
+        try:
+            data_type = context.get('data_type', 'price')
+            
+            if data_type == 'price':
+                return self._validate_price_data(data, context)
+            elif data_type == 'macro':
+                return self._validate_macro_data(data, context)
+            else:
+                self.logger.warning(f"Unknown data type for validation: {data_type}")
+                return {'status': 'unknown', 'issues': [f"Unknown data type: {data_type}"]}
+                
+        except Exception as e:
+            self.error_handler.handle_error(
+                e,
+                context={'data_type': context.get('data_type', 'unknown')},
+                subsystem='data_pipeline',
+                component='DataValidator'
+            )
+            return {'status': 'error', 'issues': [f"Validation error: {str(e)}"]}
     
     def _validate_price_data(self, data: Dict[str, pd.DataFrame], context: Dict[str, Any]) -> Dict[str, Any]:
         """Validate price data
@@ -50,7 +89,9 @@ class DataValidator(BaseValidator):
             results['issues'].append("No price data found")
             return results
         
-        required_columns = ['open', 'high', 'low', 'close']
+        required_columns = self.parameters.get('required_price_columns', ['open', 'high', 'low', 'close'])
+        warning_threshold = self.parameters.get('warning_threshold', 0.05)
+        gap_warning_threshold = self.parameters.get('gap_warning_threshold', 0.01)
         
         for pair, df in data.items():
             pair_results = {
@@ -78,7 +119,7 @@ class DataValidator(BaseValidator):
                         pair_results['nan_counts'][col] = nan_count
                         
                         # If NaN count is significant, mark as warning
-                        if nan_count > len(df) * 0.05:  # More than 5% NaN
+                        if nan_count > len(df) * warning_threshold:
                             pair_results['status'] = 'warning'
                 
                 # Check for time gaps
@@ -101,7 +142,7 @@ class DataValidator(BaseValidator):
                         pair_results['issues'].append(f"Found {gap_count} time gaps in data")
                         
                         # If gap count is significant, mark as warning
-                        if gap_count > len(df) * 0.01:  # More than 1% gaps
+                        if gap_count > len(df) * gap_warning_threshold:
                             pair_results['status'] = 'warning'
             
             # Add pair results
@@ -141,6 +182,8 @@ class DataValidator(BaseValidator):
             results['issues'].append("No macro data found or invalid format")
             return results
         
+        warning_threshold = self.parameters.get('warning_threshold', 0.05)
+        
         # Check for required indicators
         required_indicators = context.get('required_indicators', [])
         for indicator in required_indicators:
@@ -157,7 +200,7 @@ class DataValidator(BaseValidator):
                 results['nan_counts'][col] = nan_count
                 
                 # If NaN count is significant, mark as warning
-                if nan_count > len(data) * 0.05:  # More than 5% NaN
+                if nan_count > len(data) * warning_threshold:
                     results['status'] = 'warning'
         
         # Check for time consistency

@@ -1,25 +1,56 @@
-# src/data_pipeline/indicators/technical.py
+"""
+Technical Indicators - Price-based technical analysis indicators
+
+This component calculates a variety of technical analysis indicators.
+"""
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Union, Optional, Tuple
-from .base import BaseIndicator
+from typing import Dict, Any, Union, List, Optional, Tuple
 
+from balance_breaker.src.core.interface_registry import implements
+from balance_breaker.src.data_pipeline.base import BaseIndicator
+
+@implements("IndicatorCalculator")
 class TechnicalIndicators(BaseIndicator):
-    """Calculates technical analysis indicators for price data"""
+    """
+    Technical analysis indicators calculator
     
-    def __init__(self, parameters: Optional[Dict[str, Any]] = None):
-        super().__init__()
-        self._parameters = parameters or {
-            'sma_periods': [10, 20, 50, 200],      # SMA periods to calculate
-            'ema_periods': [5, 12, 26],            # EMA periods to calculate
-            'rsi_period': 14,                      # RSI period
-            'macd_params': (12, 26, 9),            # MACD parameters (fast, slow, signal)
-            'bbands_params': (20, 2),              # Bollinger Bands parameters (period, std_dev)
-            'atr_period': 14,                      # ATR period
-            'stoch_params': (14, 3, 3),            # Stochastic parameters (k_period, k_slowing, d_period)
-            'generate_all': False                  # If True, generate all indicators
+    Parameters:
+    -----------
+    sma_periods : List[int]
+        Periods for Simple Moving Average (default: [10, 20, 50, 200])
+    ema_periods : List[int]
+        Periods for Exponential Moving Average (default: [5, 12, 26])
+    rsi_period : int
+        Period for Relative Strength Index (default: 14)
+    macd_params : Tuple[int, int, int]
+        MACD parameters (fast, slow, signal) (default: (12, 26, 9))
+    bbands_params : Tuple[int, int]
+        Bollinger Bands parameters (period, std_dev) (default: (20, 2))
+    atr_period : int
+        Average True Range period (default: 14)
+    stoch_params : Tuple[int, int, int]
+        Stochastic parameters (k_period, k_slowing, d_period) (default: (14, 3, 3))
+    generate_all : bool
+        Whether to generate all indicators (default: False)
+    """
+    
+    def __init__(self, parameters=None):
+        # Define default parameters
+        default_params = {
+            'sma_periods': [10, 20, 50, 200],
+            'ema_periods': [5, 12, 26],
+            'rsi_period': 14,
+            'macd_params': (12, 26, 9),
+            'bbands_params': (20, 2),
+            'atr_period': 14,
+            'stoch_params': (14, 3, 3),
+            'generate_all': False
         }
+        
+        # Initialize with parameters
+        super().__init__(parameters or default_params)
     
     def calculate(self, data: Any, context: Dict[str, Any]) -> Any:
         """Calculate technical indicators
@@ -33,26 +64,36 @@ class TechnicalIndicators(BaseIndicator):
         Returns:
             Updated data with technical indicators
         """
-        # Handle different input types
-        if isinstance(data, dict) and 'price' in data:
-            # Process price data for each pair
-            for pair, price_df in data['price'].items():
-                data['price'][pair] = self._process_price_data(price_df, context, pair)
-            return data
+        try:
+            # Handle different input types
+            if isinstance(data, dict) and 'price' in data:
+                # Process price data for each pair
+                for pair, price_df in data['price'].items():
+                    data['price'][pair] = self._process_price_data(price_df, context, pair)
+                return data
+                
+            elif isinstance(data, dict) and all(isinstance(df, pd.DataFrame) for df in data.values()):
+                # Dictionary of price dataframes by pair
+                for pair, price_df in data.items():
+                    data[pair] = self._process_price_data(price_df, context, pair)
+                return data
+                
+            elif isinstance(data, pd.DataFrame):
+                # Single price dataframe
+                return self._process_price_data(data, context)
+                
+            else:
+                self.logger.warning(f"Unsupported data type for technical indicators: {type(data)}")
+                return data
             
-        elif isinstance(data, dict) and all(isinstance(df, pd.DataFrame) for df in data.values()):
-            # Dictionary of price dataframes by pair
-            for pair, price_df in data.items():
-                data[pair] = self._process_price_data(price_df, context, pair)
-            return data
-            
-        elif isinstance(data, pd.DataFrame):
-            # Single price dataframe
-            return self._process_price_data(data, context)
-            
-        else:
-            self.logger.warning(f"Unsupported data type for technical indicators: {type(data)}")
-            return data
+        except Exception as e:
+            self.error_handler.handle_error(
+                e,
+                context={},
+                subsystem='data_pipeline',
+                component='TechnicalIndicators'
+            )
+            raise
     
     def _process_price_data(self, df: pd.DataFrame, context: Dict[str, Any],
                           pair: Optional[str] = None) -> pd.DataFrame:
@@ -82,7 +123,7 @@ class TechnicalIndicators(BaseIndicator):
         
         # Get selected indicators from context or use parameters
         indicators = context.get('technical_indicators', [])
-        generate_all = self._parameters.get('generate_all', False)
+        generate_all = self.parameters.get('generate_all', False)
         
         # If specific indicators are requested, only calculate those
         if indicators and not generate_all:
@@ -141,11 +182,11 @@ class TechnicalIndicators(BaseIndicator):
         price = df['close']
         
         # Calculate SMAs
-        for period in self._parameters.get('sma_periods', [10, 20, 50, 200]):
+        for period in self.parameters.get('sma_periods', [10, 20, 50, 200]):
             df[f'SMA_{period}'] = price.rolling(window=period).mean()
             
         # Calculate EMAs
-        for period in self._parameters.get('ema_periods', [5, 12, 26]):
+        for period in self.parameters.get('ema_periods', [5, 12, 26]):
             df[f'EMA_{period}'] = price.ewm(span=period, adjust=False).mean()
         
         return df
@@ -159,7 +200,7 @@ class TechnicalIndicators(BaseIndicator):
         Returns:
             DataFrame with RSI column added
         """
-        period = self._parameters.get('rsi_period', 14)
+        period = self.parameters.get('rsi_period', 14)
         price = df['close']
         
         # Calculate price changes
@@ -173,8 +214,8 @@ class TechnicalIndicators(BaseIndicator):
         avg_gain = gain.rolling(window=period).mean()
         avg_loss = loss.rolling(window=period).mean()
         
-        # Calculate relative strength
-        rs = avg_gain / avg_loss
+        # Calculate relative strength (avoid divide by zero)
+        rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
         
         # Calculate RSI
         df['RSI'] = 100 - (100 / (1 + rs))
@@ -190,7 +231,7 @@ class TechnicalIndicators(BaseIndicator):
         Returns:
             DataFrame with MACD columns added
         """
-        fast_period, slow_period, signal_period = self._parameters.get('macd_params', (12, 26, 9))
+        fast_period, slow_period, signal_period = self.parameters.get('macd_params', (12, 26, 9))
         price = df['close']
         
         # Calculate fast and slow EMAs
@@ -217,7 +258,7 @@ class TechnicalIndicators(BaseIndicator):
         Returns:
             DataFrame with Bollinger Bands columns added
         """
-        period, std_dev = self._parameters.get('bbands_params', (20, 2))
+        period, std_dev = self.parameters.get('bbands_params', (20, 2))
         price = df['close']
         
         # Calculate middle band (SMA)
@@ -232,7 +273,7 @@ class TechnicalIndicators(BaseIndicator):
         
         # Calculate bandwidth and %B
         df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle']
-        df['BB_B'] = (price - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
+        df['BB_B'] = (price - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'].replace(0, np.finfo(float).eps))
         
         return df
     
@@ -245,7 +286,7 @@ class TechnicalIndicators(BaseIndicator):
         Returns:
             DataFrame with ATR column added
         """
-        period = self._parameters.get('atr_period', 14)
+        period = self.parameters.get('atr_period', 14)
         
         # Calculate true range
         tr1 = df['high'] - df['low']
@@ -268,14 +309,18 @@ class TechnicalIndicators(BaseIndicator):
         Returns:
             DataFrame with Stochastic Oscillator columns added
         """
-        k_period, k_slowing, d_period = self._parameters.get('stoch_params', (14, 3, 3))
+        k_period, k_slowing, d_period = self.parameters.get('stoch_params', (14, 3, 3))
         
         # Calculate %K
         low_min = df['low'].rolling(window=k_period).min()
         high_max = df['high'].rolling(window=k_period).max()
         
+        # Avoid division by zero
+        denominator = high_max - low_min
+        denominator = denominator.replace(0, np.finfo(float).eps)
+        
         # Raw %K
-        df['Stoch_K_Raw'] = 100 * (df['close'] - low_min) / (high_max - low_min)
+        df['Stoch_K_Raw'] = 100 * (df['close'] - low_min) / denominator
         
         # Apply slowing to get %K
         df['Stoch_K'] = df['Stoch_K_Raw'].rolling(window=k_slowing).mean()

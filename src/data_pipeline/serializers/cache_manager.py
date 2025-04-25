@@ -1,4 +1,8 @@
-# src/data_pipeline/serializers/cache_manager.py
+"""
+Cache Manager - Component for caching pipeline data
+
+This component manages caching of pipeline data for performance optimization.
+"""
 
 import os
 import pickle
@@ -7,22 +11,44 @@ import hashlib
 import time
 from typing import Dict, Any, Optional, Union, List, Tuple
 from datetime import datetime
-from .base import BaseSerializer
 
+from balance_breaker.src.core.interface_registry import implements
+from balance_breaker.src.data_pipeline.base import BaseSerializer
+
+@implements("DataSerializer")
 class CacheManager(BaseSerializer):
-    """Manager for caching pipeline data"""
+    """
+    Manager for caching pipeline data
     
-    def __init__(self, parameters: Optional[Dict[str, Any]] = None):
-        super().__init__()
-        self._parameters = parameters or {
+    Parameters:
+    -----------
+    cache_dir : str
+        Directory to store cache files (default: 'cache')
+    cache_ttl : int
+        Time-to-live for cache entries in seconds (default: 3600)
+    use_hash : bool
+        Whether to use hash for cache keys (default: True)
+    compression : bool
+        Whether to use compression for cache files (default: True)
+    max_cache_size : int
+        Maximum number of cache entries to keep (default: 1000)
+    """
+    
+    def __init__(self, parameters=None):
+        # Define default parameters
+        default_params = {
             'cache_dir': 'cache',
-            'cache_ttl': 3600,  # Time-to-live in seconds (1 hour)
-            'use_hash': True,   # Use hash for cache keys
-            'compression': True # Use compression for cache files
+            'cache_ttl': 3600,  # 1 hour
+            'use_hash': True,
+            'compression': True,
+            'max_cache_size': 1000
         }
         
+        # Initialize with parameters
+        super().__init__(parameters or default_params)
+        
         # Create cache directory if it doesn't exist
-        cache_dir = self._parameters.get('cache_dir')
+        cache_dir = self.parameters.get('cache_dir')
         if cache_dir and not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
     
@@ -39,44 +65,58 @@ class CacheManager(BaseSerializer):
         Returns:
             Cached data if loading, original data if saving or checking
         """
-        # Get cache parameters
-        cache_dir = context.get('cache_dir', self._parameters.get('cache_dir'))
-        cache_ttl = context.get('cache_ttl', self._parameters.get('cache_ttl'))
-        operation = context.get('cache_operation', 'save')
-        
-        # Generate or use provided cache key
-        if 'cache_key' in context:
-            cache_key = context['cache_key']
-        else:
-            cache_key = self._generate_cache_key(context)
-        
-        # Store cache key in context
-        context['cached_key'] = cache_key
-        
-        # Handle different operations
-        if operation == 'save':
-            # Save data to cache
-            self._save_to_cache(data, cache_key, cache_dir)
-            return data
+        try:
+            # Get cache parameters
+            cache_dir = context.get('cache_dir', self.parameters.get('cache_dir'))
+            cache_ttl = context.get('cache_ttl', self.parameters.get('cache_ttl'))
+            operation = context.get('cache_operation', 'save')
             
-        elif operation == 'load':
-            # Try to load data from cache
-            cached_data = self._load_from_cache(cache_key, cache_dir, cache_ttl)
-            if cached_data is not None:
-                context['cache_hit'] = True
-                return cached_data
+            # Generate or use provided cache key
+            if 'cache_key' in context:
+                cache_key = context['cache_key']
             else:
-                context['cache_hit'] = False
+                cache_key = self._generate_cache_key(context)
+            
+            # Store cache key in context
+            context['cached_key'] = cache_key
+            
+            # Handle different operations
+            if operation == 'save':
+                # Save data to cache
+                success = self._save_to_cache(data, cache_key, cache_dir)
+                context['cache_saved'] = success
                 return data
                 
-        elif operation == 'check':
-            # Check if data exists in cache
-            exists = self._check_cache(cache_key, cache_dir, cache_ttl)
-            context['cache_exists'] = exists
-            return data
-            
-        else:
-            self.logger.warning(f"Unknown cache operation: {operation}")
+            elif operation == 'load':
+                # Try to load data from cache
+                cached_data = self._load_from_cache(cache_key, cache_dir, cache_ttl)
+                if cached_data is not None:
+                    context['cache_hit'] = True
+                    return cached_data
+                else:
+                    context['cache_hit'] = False
+                    return data
+                    
+            elif operation == 'check':
+                # Check if data exists in cache
+                exists = self._check_cache(cache_key, cache_dir, cache_ttl)
+                context['cache_exists'] = exists
+                return data
+                
+            else:
+                self.logger.warning(f"Unknown cache operation: {operation}")
+                return data
+                
+        except Exception as e:
+            self.error_handler.handle_error(
+                e,
+                context={
+                    'operation': context.get('cache_operation', 'save'),
+                    'cache_key': context.get('cache_key')
+                },
+                subsystem='data_pipeline',
+                component='CacheManager'
+            )
             return data
     
     def _generate_cache_key(self, context: Dict[str, Any]) -> str:
@@ -115,7 +155,7 @@ class CacheManager(BaseSerializer):
                 key_elements[param] = context[param]
         
         # Convert to string and hash if configured
-        if self._parameters.get('use_hash', True):
+        if self.parameters.get('use_hash', True):
             # Convert to JSON and hash
             key_str = json.dumps(key_elements, sort_keys=True)
             return hashlib.md5(key_str.encode()).hexdigest()
@@ -186,13 +226,22 @@ class CacheManager(BaseSerializer):
             # Save to file
             with open(cache_path, 'wb') as f:
                 # Use pickle with highest protocol for better compression
-                pickle.dump(cache_entry, f, protocol=pickle.HIGHEST_PROTOCOL)
+                if self.parameters.get('compression', True):
+                    # Use highest protocol for better compression
+                    pickle.dump(cache_entry, f, protocol=pickle.HIGHEST_PROTOCOL)
+                else:
+                    pickle.dump(cache_entry, f)
                 
             self.logger.info(f"Saved data to cache: {cache_path}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error saving to cache: {str(e)}")
+            self.error_handler.handle_error(
+                e,
+                context={'cache_key': cache_key},
+                subsystem='data_pipeline',
+                component='CacheManager'
+            )
             return False
     
     def _load_from_cache(self, cache_key: str, cache_dir: str, ttl: int) -> Optional[Any]:
@@ -234,7 +283,12 @@ class CacheManager(BaseSerializer):
             return data
             
         except Exception as e:
-            self.logger.error(f"Error loading from cache: {str(e)}")
+            self.error_handler.handle_error(
+                e,
+                context={'cache_key': cache_key},
+                subsystem='data_pipeline',
+                component='CacheManager'
+            )
             return None
     
     def _check_cache(self, cache_key: str, cache_dir: str, ttl: int) -> bool:
@@ -269,7 +323,12 @@ class CacheManager(BaseSerializer):
             return age <= ttl
             
         except Exception as e:
-            self.logger.error(f"Error checking cache: {str(e)}")
+            self.error_handler.handle_error(
+                e,
+                context={'cache_key': cache_key},
+                subsystem='data_pipeline',
+                component='CacheManager'
+            )
             return False
     
     def clear_cache(self, older_than: Optional[int] = None) -> int:
@@ -281,7 +340,7 @@ class CacheManager(BaseSerializer):
         Returns:
             Number of files cleared
         """
-        cache_dir = self._parameters.get('cache_dir')
+        cache_dir = self.parameters.get('cache_dir')
         if not cache_dir or not os.path.exists(cache_dir):
             return 0
         
@@ -305,7 +364,62 @@ class CacheManager(BaseSerializer):
                     os.remove(filepath)
                     count += 1
                 except Exception as e:
-                    self.logger.error(f"Error removing cache file: {str(e)}")
+                    self.error_handler.handle_error(
+                        e,
+                        context={'filepath': filepath},
+                        subsystem='data_pipeline',
+                        component='CacheManager'
+                    )
         
         self.logger.info(f"Cleared {count} cache files from {cache_dir}")
+        return count
+    
+    def prune_cache(self, max_entries: Optional[int] = None) -> int:
+        """Prune cache to keep only the most recent entries
+        
+        Args:
+            max_entries: Maximum number of entries to keep
+            
+        Returns:
+            Number of files removed
+        """
+        cache_dir = self.parameters.get('cache_dir')
+        if not cache_dir or not os.path.exists(cache_dir):
+            return 0
+        
+        # Use parameter if not provided
+        if max_entries is None:
+            max_entries = self.parameters.get('max_cache_size', 1000)
+        
+        # Get list of cache files with modification times
+        cache_files = []
+        for filename in os.listdir(cache_dir):
+            if filename.endswith('.cache'):
+                filepath = os.path.join(cache_dir, filename)
+                mtime = os.path.getmtime(filepath)
+                cache_files.append((filepath, mtime))
+        
+        # Sort by modification time (newest first)
+        cache_files.sort(key=lambda x: x[1], reverse=True)
+        
+        # Keep only the most recent entries
+        files_to_remove = cache_files[max_entries:]
+        
+        # Remove excess files
+        count = 0
+        for filepath, _ in files_to_remove:
+            try:
+                os.remove(filepath)
+                count += 1
+            except Exception as e:
+                self.error_handler.handle_error(
+                    e,
+                    context={'filepath': filepath},
+                    subsystem='data_pipeline',
+                    component='CacheManager'
+                )
+        
+        if count > 0:
+            self.logger.info(f"Pruned {count} cache files from {cache_dir}")
+        
         return count

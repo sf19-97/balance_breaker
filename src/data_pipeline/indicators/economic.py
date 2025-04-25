@@ -1,21 +1,50 @@
-# src/data_pipeline/indicators/economic.py
+"""
+Economic Indicators - Macroeconomic indicators and derived metrics
+
+This component calculates economic indicators and derived metrics from macroeconomic data.
+"""
 
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List, Union, Optional
-from .base import BaseIndicator
 
+from balance_breaker.src.core.interface_registry import implements
+from balance_breaker.src.data_pipeline.base import BaseIndicator
+
+@implements("IndicatorCalculator")
 class EconomicIndicators(BaseIndicator):
-    """Calculates economic indicators and derived metrics"""
+    """
+    Economic indicators calculator
     
-    def __init__(self, parameters: Optional[Dict[str, Any]] = None):
-        super().__init__()
-        self._parameters = parameters or {
+    Parameters:
+    -----------
+    correlation_window : int
+        Window for correlation calculations (default: 60)
+    volatility_window : int
+        Window for volatility calculations (default: 30)
+    generate_spreads : bool
+        Whether to generate yield spreads (default: True)
+    generate_differentials : bool
+        Whether to generate inflation differentials (default: True)
+    policy_sensitivity : float
+        Sensitivity factor for policy regime detection (default: 1.5)
+    natural_rate_lookback : int
+        Lookback period for natural rate estimation in days (default: 365)
+    """
+    
+    def __init__(self, parameters=None):
+        # Define default parameters
+        default_params = {
             'correlation_window': 60,      # Window for correlation calculations
             'volatility_window': 30,       # Window for volatility calculations
             'generate_spreads': True,      # Generate yield spreads
-            'generate_differentials': True # Generate inflation differentials
+            'generate_differentials': True, # Generate inflation differentials
+            'policy_sensitivity': 1.5,     # Policy regime sensitivity
+            'natural_rate_lookback': 365   # Lookback period for natural rate
         }
+        
+        # Initialize with parameters
+        super().__init__(parameters or default_params)
     
     def calculate(self, data: Any, context: Dict[str, Any]) -> Any:
         """Calculate economic indicators
@@ -28,20 +57,30 @@ class EconomicIndicators(BaseIndicator):
         Returns:
             Updated data with economic indicators
         """
-        # Handle different input types
-        if isinstance(data, dict) and 'aligned_macro' in data:
-            # Process aligned macro data for each pair
-            for pair, macro_df in data['aligned_macro'].items():
-                data['aligned_macro'][pair] = self._process_macro_data(macro_df, context, pair)
-            return data
-        
-        elif isinstance(data, pd.DataFrame):
-            # Single macro dataframe
-            return self._process_macro_data(data, context)
+        try:
+            # Handle different input types
+            if isinstance(data, dict) and 'aligned_macro' in data:
+                # Process aligned macro data for each pair
+                for pair, macro_df in data['aligned_macro'].items():
+                    data['aligned_macro'][pair] = self._process_macro_data(macro_df, context, pair)
+                return data
             
-        else:
-            self.logger.warning(f"Unsupported data type for economic indicators: {type(data)}")
-            return data
+            elif isinstance(data, pd.DataFrame):
+                # Single macro dataframe
+                return self._process_macro_data(data, context)
+                
+            else:
+                self.logger.warning(f"Unsupported data type for economic indicators: {type(data)}")
+                return data
+                
+        except Exception as e:
+            self.error_handler.handle_error(
+                e,
+                context={},
+                subsystem='data_pipeline',
+                component='EconomicIndicators'
+            )
+            raise
     
     def _process_macro_data(self, df: pd.DataFrame, context: Dict[str, Any], 
                            pair: Optional[str] = None) -> pd.DataFrame:
@@ -72,11 +111,11 @@ class EconomicIndicators(BaseIndicator):
                 quote_curr = pair[3:]
         
         # 1. Generate yield spreads (across countries)
-        if self._parameters.get('generate_spreads', True):
+        if self.parameters.get('generate_spreads', True):
             result = self._generate_yield_spreads(result, context, base_curr, quote_curr)
         
         # 2. Generate inflation differentials
-        if self._parameters.get('generate_differentials', True):
+        if self.parameters.get('generate_differentials', True):
             result = self._generate_inflation_differentials(result, context, base_curr, quote_curr)
         
         # 3. Calculate VIX correlations
@@ -112,8 +151,8 @@ class EconomicIndicators(BaseIndicator):
         # Calculate curve steepness (10Y-2Y spread) within countries
         for country_code in ['US', 'JP', 'AU', 'CA', 'EU', 'GB']:
             # Check if we have both 2Y and 10Y for this country
-            country_2y = next((col for col in spreads_2y if f"{country_code}-" in col or f"-{country_code}" in col), None)
-            country_10y = next((col for col in spreads_10y if f"{country_code}-" in col or f"-{country_code}" in col), None)
+            country_2y = next((col for col in spreads_2y if f"{country_code}_2Y" in col), None)
+            country_10y = next((col for col in spreads_10y if f"{country_code}_10Y" in col), None)
             
             if country_2y and country_10y:
                 curve_name = f"{country_code}_CURVE_STEEPNESS"
@@ -226,7 +265,7 @@ class EconomicIndicators(BaseIndicator):
             return df
             
         # Get correlation window size
-        window = self._parameters.get('correlation_window', 60)
+        window = self.parameters.get('correlation_window', 60)
         
         # Calculate VIX changes
         df['VIX_CHANGE'] = df['VIX'].diff()
@@ -294,6 +333,10 @@ class EconomicIndicators(BaseIndicator):
         if not target_countries:
             target_countries = ['US', 'JP', 'AU', 'CA', 'EU', 'GB']
         
+        # Get policy sensitivity parameter
+        policy_sensitivity = self.parameters.get('policy_sensitivity', 1.5)
+        natural_rate_lookback = self.parameters.get('natural_rate_lookback', 365)
+        
         # Process each country
         for country in target_countries:
             # Look for indicators needed for regime estimation
@@ -323,7 +366,7 @@ class EconomicIndicators(BaseIndicator):
                             continue
                     
                     # Smooth with long-term moving average
-                    natural_rate = real_rate.rolling(window=365, min_periods=60).mean()
+                    natural_rate = real_rate.rolling(window=natural_rate_lookback, min_periods=min(60, natural_rate_lookback//4)).mean()
                     df[natural_rate_name] = natural_rate
                 
                 # Calculate rate gap
@@ -333,13 +376,14 @@ class EconomicIndicators(BaseIndicator):
                     
                     # Calculate probability of being at lower bound
                     lb_prob_name = f"{country}_LB_PROBABILITY"
-                    # Use logistic function: 1/(1+exp(2*gap))
-                    df[lb_prob_name] = 1 / (1 + np.exp(2 * df[rate_gap_name]))
+                    # Use logistic function: 1/(1+exp(policy_sensitivity*gap))
+                    df[lb_prob_name] = 1 / (1 + np.exp(policy_sensitivity * df[rate_gap_name]))
                     
                     # Binary regime indicator (0 = lower bound, 1 = normal)
-                    # Following the paper's threshold (psi-1)/psi where psi=1.5
+                    # Following the typical threshold of (psi-1)/psi where psi is policy_sensitivity
+                    threshold = (policy_sensitivity - 1) / policy_sensitivity
                     regime_name = f"{country}_REGIME"
-                    df[regime_name] = (df[lb_prob_name] < 0.33).astype(int)
+                    df[regime_name] = (df[lb_prob_name] < threshold).astype(int)
                     
                     self.logger.debug(f"Created regime indicators for {country}")
         

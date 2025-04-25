@@ -1,4 +1,8 @@
-# src/data_pipeline/serializers/exporter.py
+"""
+Data Exporter - Export data to various formats
+
+This component exports data to various file formats and destinations.
+"""
 
 import os
 import pandas as pd
@@ -7,20 +11,41 @@ import pickle
 from typing import Dict, Any, Optional, Union, List
 from pathlib import Path
 from datetime import datetime
-from .base import BaseSerializer
 
+from balance_breaker.src.core.interface_registry import implements
+from balance_breaker.src.data_pipeline.base import BaseSerializer
+
+@implements("DataSerializer")
 class DataExporter(BaseSerializer):
-    """Exporter for saving data to various formats"""
+    """
+    Exporter for saving data to various formats
     
-    def __init__(self, parameters: Optional[Dict[str, Any]] = None):
-        super().__init__()
-        self._parameters = parameters or {
+    Parameters:
+    -----------
+    export_dir : str
+        Directory to save exported files (default: 'exported_data')
+    export_formats : List[str]
+        List of formats to export to (default: ['csv'])
+    timestamp_format : str
+        Format for timestamp in filenames (default: '%Y%m%d_%H%M%S')
+    include_timestamp : bool
+        Whether to include timestamp in filenames (default: True)
+    create_subfolders : bool
+        Whether to create subfolders for different data types (default: True)
+    """
+    
+    def __init__(self, parameters=None):
+        # Define default parameters
+        default_params = {
             'export_dir': 'exported_data',
             'export_formats': ['csv'],
             'timestamp_format': '%Y%m%d_%H%M%S',
             'include_timestamp': True,
             'create_subfolders': True
         }
+        
+        # Initialize with parameters
+        super().__init__(parameters or default_params)
     
     def serialize(self, data: Any, context: Dict[str, Any]) -> Any:
         """Export data to specified formats
@@ -35,44 +60,58 @@ class DataExporter(BaseSerializer):
         Returns:
             Original data (export paths are added to context)
         """
-        # Get export parameters from context or use defaults
-        export_formats = context.get('export_formats', self._parameters.get('export_formats'))
-        export_dir = context.get('export_dir', self._parameters.get('export_dir'))
-        export_prefix = context.get('export_prefix', 'data_export')
-        
-        # Add timestamp if configured
-        if self._parameters.get('include_timestamp', True):
-            timestamp = datetime.now().strftime(self._parameters.get('timestamp_format'))
-            export_prefix = f"{export_prefix}_{timestamp}"
-        
-        # Create export directory if it doesn't exist
-        if not os.path.exists(export_dir):
-            os.makedirs(export_dir)
-        
-        # Initialize export results
-        if 'export_results' not in context:
-            context['export_results'] = {}
-        
-        # Determine data type and export accordingly
-        if isinstance(data, pd.DataFrame):
-            # Single DataFrame
-            context['export_results'] = self._export_dataframe(
-                data, export_formats, export_dir, export_prefix, context
-            )
+        try:
+            # Get export parameters from context or use defaults
+            export_formats = context.get('export_formats', self.parameters.get('export_formats'))
+            export_dir = context.get('export_dir', self.parameters.get('export_dir'))
+            export_prefix = context.get('export_prefix', 'data_export')
             
-        elif isinstance(data, dict) and self._contains_dataframes(data):
-            # Dictionary of DataFrames or nested structure
-            context['export_results'] = self._export_dataframe_dict(
-                data, export_formats, export_dir, export_prefix, context
-            )
+            # Add timestamp if configured
+            if self.parameters.get('include_timestamp', True):
+                timestamp = datetime.now().strftime(self.parameters.get('timestamp_format'))
+                export_prefix = f"{export_prefix}_{timestamp}"
             
-        else:
-            # Other data types
-            context['export_results'] = self._export_generic(
-                data, export_formats, export_dir, export_prefix, context
+            # Create export directory if it doesn't exist
+            if not os.path.exists(export_dir):
+                os.makedirs(export_dir)
+            
+            # Initialize export results
+            if 'export_results' not in context:
+                context['export_results'] = {}
+            
+            # Determine data type and export accordingly
+            if isinstance(data, pd.DataFrame):
+                # Single DataFrame
+                context['export_results'] = self._export_dataframe(
+                    data, export_formats, export_dir, export_prefix, context
+                )
+                
+            elif isinstance(data, dict) and self._contains_dataframes(data):
+                # Dictionary of DataFrames or nested structure
+                context['export_results'] = self._export_dataframe_dict(
+                    data, export_formats, export_dir, export_prefix, context
+                )
+                
+            else:
+                # Other data types
+                context['export_results'] = self._export_generic(
+                    data, export_formats, export_dir, export_prefix, context
+                )
+            
+            return data
+            
+        except Exception as e:
+            self.error_handler.handle_error(
+                e,
+                context={
+                    'export_formats': context.get('export_formats', self.parameters.get('export_formats')),
+                    'export_dir': context.get('export_dir', self.parameters.get('export_dir'))
+                },
+                subsystem='data_pipeline',
+                component='DataExporter'
             )
-        
-        return data
+            # Return original data
+            return data
     
     def _contains_dataframes(self, data_dict: Dict) -> bool:
         """Check if dictionary contains DataFrames
@@ -150,7 +189,12 @@ class DataExporter(BaseSerializer):
                     self.logger.warning(f"Unsupported export format: {fmt}")
                     
             except Exception as e:
-                self.logger.error(f"Error exporting DataFrame to {fmt}: {str(e)}")
+                self.error_handler.handle_error(
+                    e,
+                    context={'format': fmt, 'prefix': prefix},
+                    subsystem='data_pipeline',
+                    component='DataExporter'
+                )
         
         return results
     
@@ -172,7 +216,7 @@ class DataExporter(BaseSerializer):
         results = {}
         
         # Create subfolders if configured
-        create_subfolders = self._parameters.get('create_subfolders', True)
+        create_subfolders = self.parameters.get('create_subfolders', True)
         
         for key, value in data_dict.items():
             # Create key-specific prefix
@@ -249,7 +293,12 @@ class DataExporter(BaseSerializer):
                     self.logger.warning(f"Unsupported export format for generic data: {fmt}")
                     
             except Exception as e:
-                self.logger.error(f"Error exporting data to {fmt}: {str(e)}")
+                self.error_handler.handle_error(
+                    e,
+                    context={'format': fmt, 'prefix': prefix},
+                    subsystem='data_pipeline',
+                    component='DataExporter'
+                )
         
         return results
     

@@ -1,11 +1,40 @@
-# src/data_pipeline/aligners/time_aligner.py
+"""
+Time Aligner - Time-based data synchronization component
+
+This component aligns multiple time series to a common timeline.
+"""
 
 import pandas as pd
 from typing import Dict, Any, Union, List, Tuple
-from .base import BaseAligner
 
+from balance_breaker.src.core.interface_registry import implements
+from balance_breaker.src.data_pipeline.base import BaseAligner
+
+@implements("DataAligner")
 class TimeAligner(BaseAligner):
-    """Aligner for time-based data synchronization"""
+    """
+    Aligner for time-based data synchronization
+    
+    Parameters:
+    -----------
+    fill_method : str
+        Method for filling missing values after alignment (default: 'ffill')
+    align_to_highest_frequency : bool
+        Whether to align to the highest frequency time series (default: True)
+    handle_missing : str
+        Method for handling missing values ('ffill', 'bfill', 'nearest', 'interpolate') (default: 'ffill')
+    """
+    
+    def __init__(self, parameters=None):
+        # Define default parameters
+        default_params = {
+            'fill_method': 'ffill',
+            'align_to_highest_frequency': True,
+            'handle_missing': 'ffill'
+        }
+        
+        # Initialize with parameters
+        super().__init__(parameters or default_params)
     
     def align_data(self, data: Any, context: Dict[str, Any]) -> Any:
         """Align price and macro data to common timeline
@@ -17,37 +46,47 @@ class TimeAligner(BaseAligner):
         Returns:
             Dictionary with aligned price and macro data
         """
-        data_type = context.get('data_type')
-        
-        # Determine what we're aligning
-        if 'price_data' in context and 'macro_data' in context:
-            # If we have both price and macro data in context, align them
-            return self._align_price_with_macro(context['price_data'], context['macro_data'], context)
+        try:
+            data_type = context.get('data_type')
             
-        elif isinstance(data, dict) and all(isinstance(df, pd.DataFrame) for df in data.values()):
-            if data_type == 'price':
-                # If we're processing price data dict
-                price_data = data
-                macro_data = context.get('macro_data')
+            # Determine what we're aligning
+            if 'price_data' in context and 'macro_data' in context:
+                # If we have both price and macro data in context, align them
+                return self._align_price_with_macro(context['price_data'], context['macro_data'], context)
                 
-                if macro_data is not None and isinstance(macro_data, pd.DataFrame):
-                    # If macro data is available, align price data with it
-                    return self._align_price_with_macro(price_data, macro_data, context)
+            elif isinstance(data, dict) and all(isinstance(df, pd.DataFrame) for df in data.values()):
+                if data_type == 'price':
+                    # If we're processing price data dict
+                    price_data = data
+                    macro_data = context.get('macro_data')
+                    
+                    if macro_data is not None and isinstance(macro_data, pd.DataFrame):
+                        # If macro data is available, align price data with it
+                        return self._align_price_with_macro(price_data, macro_data, context)
+                    else:
+                        # Otherwise just align price data timeframes with each other
+                        return self._align_price_data(price_data, context)
                 else:
-                    # Otherwise just align price data timeframes with each other
-                    return self._align_price_data(price_data, context)
-            else:
-                # Generic dictionary of dataframes alignment
-                return self._align_multi_dataframes(data, context)
-        
-        elif isinstance(data, pd.DataFrame):
-            if data_type == 'macro':
-                # Single macro dataframe, nothing to align with
-                return data
-        
-        # Return unchanged if no alignment needed or possible
-        self.logger.warning("No suitable data for alignment found")
-        return data
+                    # Generic dictionary of dataframes alignment
+                    return self._align_multi_dataframes(data, context)
+            
+            elif isinstance(data, pd.DataFrame):
+                if data_type == 'macro':
+                    # Single macro dataframe, nothing to align with
+                    return data
+            
+            # Return unchanged if no alignment needed or possible
+            self.logger.warning("No suitable data for alignment found")
+            return data
+            
+        except Exception as e:
+            self.error_handler.handle_error(
+                e,
+                context={'data_type': context.get('data_type', 'unknown')},
+                subsystem='data_pipeline',
+                component='TimeAligner'
+            )
+            raise
     
     def _align_price_with_macro(self, price_data: Dict[str, pd.DataFrame], 
                                macro_data: pd.DataFrame, 
@@ -83,7 +122,12 @@ class TimeAligner(BaseAligner):
                 self.logger.info(f"Aligned macro data with {pair} price data: {len(aligned_macro)} rows")
                 
             except Exception as e:
-                self.logger.error(f"Error aligning {pair} with macro data: {str(e)}")
+                self.error_handler.handle_error(
+                    e,
+                    context={'pair': pair},
+                    subsystem='data_pipeline',
+                    component='TimeAligner'
+                )
         
         return result
     
@@ -109,18 +153,20 @@ class TimeAligner(BaseAligner):
             self.logger.warning("Price data index is not DatetimeIndex, attempting conversion")
             price_df.index = pd.to_datetime(price_df.index)
             
-        # Determine fill method
-        fill_method = context.get('fill_method', 'ffill')
+        # Determine fill method from parameters
+        fill_method = self.parameters.get('fill_method', 'ffill')
         
         # Reindex macro data to price data timeline
         aligned = macro_df.reindex(price_df.index, method=fill_method)
         
-        # Handle any remaining NaNs
-        if fill_method == 'ffill':
+        # Handle any remaining NaNs based on parameter
+        handle_missing = self.parameters.get('handle_missing', 'ffill')
+        
+        if handle_missing == 'ffill':
             aligned = aligned.ffill().bfill()
-        elif fill_method == 'nearest':
+        elif handle_missing == 'nearest':
             aligned = aligned.interpolate(method='nearest')
-        else:
+        elif handle_missing == 'interpolate':
             aligned = aligned.interpolate(method='time')
         
         return aligned
@@ -187,19 +233,21 @@ class TimeAligner(BaseAligner):
         freq_priority = ['S', 'T', 'min', '5min', '15min', '30min', 'H', '2H', '4H', 'D', 'W', 'M']
         target_freq = None
         
-        for df in data_dict.values():
-            if len(df) > 1 and isinstance(df.index, pd.DatetimeIndex):
-                # Infer frequency
-                inferred_freq = pd.infer_freq(df.index)
-                if inferred_freq:
-                    # Check priority
-                    if target_freq is None:
-                        target_freq = inferred_freq
-                    else:
-                        idx1 = freq_priority.index(inferred_freq) if inferred_freq in freq_priority else len(freq_priority)
-                        idx2 = freq_priority.index(target_freq) if target_freq in freq_priority else len(freq_priority)
-                        if idx1 < idx2:  # Lower index means higher priority
+        # If align_to_highest_frequency parameter is True, find highest frequency
+        if self.parameters.get('align_to_highest_frequency', True):
+            for df in data_dict.values():
+                if len(df) > 1 and isinstance(df.index, pd.DatetimeIndex):
+                    # Infer frequency
+                    inferred_freq = pd.infer_freq(df.index)
+                    if inferred_freq:
+                        # Check priority
+                        if target_freq is None:
                             target_freq = inferred_freq
+                        else:
+                            idx1 = freq_priority.index(inferred_freq) if inferred_freq in freq_priority else len(freq_priority)
+                            idx2 = freq_priority.index(target_freq) if target_freq in freq_priority else len(freq_priority)
+                            if idx1 < idx2:  # Lower index means higher priority
+                                target_freq = inferred_freq
         
         # If no frequency detected, just return original data
         if target_freq is None:

@@ -1,16 +1,42 @@
-# src/data_pipeline/indicators/composite.py
+"""
+Composite Indicators - Balance Breaker-specific composite indicators
+
+This component calculates composite indicators specific to the Balance Breaker strategy.
+"""
 
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List, Union, Optional, Tuple
-from .base import BaseIndicator
 
+from balance_breaker.src.core.interface_registry import implements
+from balance_breaker.src.data_pipeline.base import BaseIndicator
+
+@implements("IndicatorCalculator")
 class CompositeIndicators(BaseIndicator):
-    """Calculates composite indicators specific to Balance Breaker strategy"""
+    """
+    Calculates composite indicators specific to Balance Breaker strategy
     
-    def __init__(self, parameters: Optional[Dict[str, Any]] = None):
-        super().__init__()
-        self._parameters = parameters or {
+    Parameters:
+    -----------
+    precession_window : int
+        Window for precession calculation (default: 20)
+    instability_window : int
+        Window for instability calculation (default: 20)
+    market_mood_window : int
+        Window for market mood calculation (default: 20)
+    natural_rate_lookback : int
+        Lookback period for natural rate estimation (default: 365)
+    natural_rate_smoothing : int
+        Smoothing period for natural rate (default: 60)
+    policy_psi : float
+        Policy rule parameter (default: 1.5)
+    corr_threshold : float
+        VIX-inflation correlation threshold (default: -0.2)
+    """
+    
+    def __init__(self, parameters=None):
+        # Define default parameters
+        default_params = {
             'precession_window': 20,       # Window for precession calculation
             'instability_window': 20,      # Window for instability calculation
             'market_mood_window': 20,      # Window for market mood calculation
@@ -19,6 +45,9 @@ class CompositeIndicators(BaseIndicator):
             'policy_psi': 1.5,             # Policy rule parameter
             'corr_threshold': -0.2         # VIX-inflation correlation threshold
         }
+        
+        # Initialize with parameters
+        super().__init__(parameters or default_params)
     
     def calculate(self, data: Any, context: Dict[str, Any]) -> Any:
         """Calculate composite indicators
@@ -30,35 +59,50 @@ class CompositeIndicators(BaseIndicator):
         Returns:
             Updated data with composite indicators
         """
-        # Ensure we have the right data structure
-        if not isinstance(data, dict) or 'aligned_macro' not in data or 'price' not in data:
-            self.logger.warning("Invalid data structure for composite indicators")
+        try:
+            # Ensure we have the right data structure
+            if not isinstance(data, dict) or 'aligned_macro' not in data or 'price' not in data:
+                self.logger.warning("Invalid data structure for composite indicators")
+                return data
+                
+            # Process each pair
+            for pair in data['price'].keys():
+                if pair in data['aligned_macro']:
+                    try:
+                        # Calculate Balance Breaker specific indicators
+                        bb_indicators = self._calculate_balance_breaker_indicators(
+                            price_df=data['price'][pair],
+                            macro_df=data['aligned_macro'][pair],
+                            pair=pair,
+                            context=context
+                        )
+                        
+                        # Add indicators to data
+                        data['aligned_macro'][pair] = pd.concat([
+                            data['aligned_macro'][pair], 
+                            bb_indicators
+                        ], axis=1)
+                        
+                        self.logger.info(f"Added composite indicators for {pair}")
+                        
+                    except Exception as e:
+                        self.error_handler.handle_error(
+                            e,
+                            context={'pair': pair},
+                            subsystem='data_pipeline',
+                            component='CompositeIndicators'
+                        )
+            
             return data
             
-        # Process each pair
-        for pair in data['price'].keys():
-            if pair in data['aligned_macro']:
-                try:
-                    # Calculate Balance Breaker specific indicators
-                    bb_indicators = self._calculate_balance_breaker_indicators(
-                        price_df=data['price'][pair],
-                        macro_df=data['aligned_macro'][pair],
-                        pair=pair,
-                        context=context
-                    )
-                    
-                    # Add indicators to data
-                    data['aligned_macro'][pair] = pd.concat([
-                        data['aligned_macro'][pair], 
-                        bb_indicators
-                    ], axis=1)
-                    
-                    self.logger.info(f"Added composite indicators for {pair}")
-                    
-                except Exception as e:
-                    self.logger.error(f"Error calculating composite indicators for {pair}: {str(e)}")
-        
-        return data
+        except Exception as e:
+            self.error_handler.handle_error(
+                e,
+                context={},
+                subsystem='data_pipeline',
+                component='CompositeIndicators'
+            )
+            raise
     
     def _calculate_balance_breaker_indicators(self, price_df: pd.DataFrame, 
                                             macro_df: pd.DataFrame,
@@ -116,7 +160,7 @@ class CompositeIndicators(BaseIndicator):
         Returns:
             Series with precession values
         """
-        window = self._parameters.get('precession_window', 20)
+        window = self.parameters.get('precession_window', 20)
         
         # Find yield columns for precession calculation
         yield_cols = [col for col in macro_df.columns if any(term in col for term in ['2Y', '10Y'])]
@@ -172,7 +216,7 @@ class CompositeIndicators(BaseIndicator):
         Returns:
             Series with market mood values
         """
-        window = self._parameters.get('market_mood_window', 20)
+        window = self.parameters.get('market_mood_window', 20)
         
         # Find relevant columns for mood calculation
         mood_components = []
@@ -224,7 +268,7 @@ class CompositeIndicators(BaseIndicator):
         Returns:
             Series with instability values
         """
-        window = self._parameters.get('instability_window', 20)
+        window = self.parameters.get('instability_window', 20)
         
         # Components of instability
         instability_components = []
@@ -338,7 +382,7 @@ class CompositeIndicators(BaseIndicator):
             Updated indicators dataframe
         """
         # Get correlation threshold parameter
-        corr_threshold = self._parameters.get('corr_threshold', -0.2)
+        corr_threshold = self.parameters.get('corr_threshold', -0.2)
         
         # Look for VIX correlation columns
         vix_cols = [col for col in macro_df.columns if 'VIX_' in col and 'CORR' in col]
